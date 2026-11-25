@@ -1,0 +1,158 @@
+# ==============================================================================
+#@title CELL 4: REPEATED-MEASURES CORRELATIONS ANCHORED ON EXERCISE VO2
+# ==============================================================================
+
+for (pkg in c("rmcorr", "openxlsx", "gridExtra", "grid")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg, quiet = TRUE)
+}
+
+library(dplyr)
+library(readxl)
+library(rmcorr)
+library(openxlsx)
+library(gridExtra)
+library(grid)
+
+# Uncomment if 'df' is not already loaded in memory:
+# df <- read_excel("BANCO_COMPLETO_CONSOLIDADO_LONG_ARTIGO_1.xlsx")
+
+# 1. Anchor outcome: Relative VO2 during Exercise
+vo2_alvo <- "Esforço_VO2_Rel_Média"
+
+# 2. Independent physiological domains (mean variables only)
+dominios <- list(
+  "1. Mechanical" = c(
+    "trabalho", "cadencia", "Potência"
+  ),
+  "2. Internal Load" = c(
+    "Esforço_HR_Média", "Recuperação_HR_Média", "PSE"
+  ),
+  "3. Respiratory" = c(
+    "Recuperação_VO2_Rel_Média",
+    "Esforço_VE_VCO2_Média", "Recuperação_VE_VCO2_Média",
+    "Esforço_PetO2_Média",   "Recuperação_PetO2_Média",
+    "Esforço_PetCO2_Média",  "Recuperação_PetCO2_Média"
+  ),
+  "4. Oxygenation" = c(
+    "Sat.E", "Sat.R",
+    "Esforço_TSI_Ex_Média",   "Recuperação_TSI_Ex_Média",
+    "Esforço_HHb_Ex_Média",   "Recuperação_HHb_Ex_Média",
+    "Esforço_O2Hb_Ex_Média",  "Recuperação_O2Hb_Ex_Média",
+    "Esforço_THb_Ex_Média",   "Recuperação_THb_Ex_Média",
+    "Esforço_TSI_Ctrl_Média", "Recuperação_TSI_Ctrl_Média",
+    "Esforço_HHb_Ctrl_Média", "Recuperação_HHb_Ctrl_Média"
+  )
+)
+
+lista_pred <- bind_rows(lapply(names(dominios), function(dom) {
+  vars_ok <- setdiff(intersect(dominios[[dom]], names(df)), vo2_alvo)
+  if (length(vars_ok) == 0) return(NULL)
+  data.frame(Dominio = dom, Variavel = vars_ok, stringsAsFactors = FALSE)
+}))
+
+# 3. Compute rmcorr across Overall and individual conditions (HH, HN, NN)
+rodar_rmcorr_bloco <- function(dados_bloco, var_x, var_y) {
+  sub <- dados_bloco %>% select(ID, all_of(var_x), all_of(var_y)) %>% na.omit()
+  sub$ID <- as.factor(sub$ID)
+  if (nrow(sub) < 10) return(list(r = NA, r2 = NA, p = NA, txt = "-"))
+
+  fit <- tryCatch(
+    rmcorr::rmcorr(participant = ID, measure1 = var_x, measure2 = var_y, dataset = sub),
+    error = function(e) NULL
+  )
+  if (is.null(fit)) return(list(r = NA, r2 = NA, p = NA, txt = "-"))
+
+  r_v  <- fit$r
+  r2_v <- (r_v^2) * 100
+  p_v  <- fit$p
+  p_s  <- ifelse(p_v < 0.001, "<0.001", sprintf("%.3f", p_v))
+  sig_mark <- ifelse(!is.na(p_v) && p_v < 0.05, " *", "")
+
+  txt_cell <- sprintf("%+.2f (%.1f%%) | p=%s%s", r_v, r2_v, p_s, sig_mark)
+  return(list(r = r_v, r2 = r2_v, p = p_v, txt = txt_cell))
+}
+
+condicoes <- unique(as.character(df$Condição))
+tabela_vis_list   <- list()
+tabela_excel_list <- list()
+
+for (i in 1:nrow(lista_pred)) {
+  dom <- lista_pred$Dominio[i]
+  var <- lista_pred$Variavel[i]
+
+  res_all   <- rodar_rmcorr_bloco(df, var, vo2_alvo)
+  row_vis   <- data.frame(Domain = dom, Variable = var, `Overall (All)` = res_all$txt, check.names = FALSE)
+  row_excel <- data.frame(
+    Domain       = dom,
+    Variable     = var,
+    r_Overall    = round(res_all$r, 3),
+    R2_Overall   = round(res_all$r2, 1),
+    p_Overall    = round(res_all$p, 4)
+  )
+
+  for (c_nome in condicoes) {
+    res_c <- rodar_rmcorr_bloco(df %>% filter(Condição == c_nome), var, vo2_alvo)
+    row_vis[[c_nome]]                          <- res_c$txt
+    row_excel[[paste0("r_", c_nome)]]          <- round(res_c$r, 3)
+    row_excel[[paste0("R2_", c_nome, "_pct")]] <- round(res_c$r2, 1)
+    row_excel[[paste0("p_", c_nome)]]          <- round(res_c$p, 4)
+  }
+
+  tabela_vis_list[[i]]   <- row_vis
+  tabela_excel_list[[i]] <- row_excel
+}
+
+df_vis   <- bind_rows(tabela_vis_list)
+df_excel <- bind_rows(tabela_excel_list)
+
+# 4. Export to Excel
+write.xlsx(df_excel, "Correlacoes_rmcorr_Esforco_VO2.xlsx", overwrite = TRUE)
+
+# 5. Render native visual table in Colab (highlighting p < 0.05 in soft red + bold)
+n_rows <- nrow(df_vis)
+n_cols <- ncol(df_vis)
+
+fill_mat <- matrix("#FFFFFF", nrow = n_rows, ncol = n_cols)
+font_mat <- matrix("plain",   nrow = n_rows, ncol = n_cols)
+col_mat  <- matrix("#111111", nrow = n_rows, ncol = n_cols)
+
+# Alternate row shading for readability
+fill_mat[seq(2, n_rows, 2), ] <- "#F7F9FC"
+font_mat[, 1] <- "bold"
+
+# Highlight significant cells (containing '*')
+for (r in 1:n_rows) {
+  for (c in 3:n_cols) {
+    if (grepl("\\*", df_vis[r, c])) {
+      fill_mat[r, c] <- "#FDECEA"
+      font_mat[r, c] <- "bold"
+      col_mat[r, c]  <- "#B22222"
+    }
+  }
+}
+
+tema_tabela <- ttheme_default(
+  base_size = 11,
+  core = list(
+    bg_params = list(fill = fill_mat, col = "#D0D7DE", lwd = 0.8),
+    fg_params = list(fontface = font_mat, col = col_mat, hjust = 0.5, x = 0.5)
+  ),
+  colhead = list(
+    bg_params = list(fill = "#1F4E78", col = "#FFFFFF", lwd = 1),
+    fg_params = list(fontface = "bold", col = "#FFFFFF", fontsize = 12)
+  )
+)
+
+tg <- tableGrob(df_vis, rows = NULL, theme = tema_tabela)
+
+titulo <- textGrob(
+  "Repeated-Measures Correlations: r_rm (R² %) | p-value vs. Esforço_VO2_Rel_Média (N = 17)",
+  gp = gpar(fontsize = 14, fontface = "bold")
+)
+rodape <- textGrob(
+  "* Highlighted cells indicate significant within-subject associations (p < 0.05). Full table saved to 'Correlacoes_rmcorr_Esforco_VO2.xlsx'.",
+  gp = gpar(fontsize = 10, fontface = "italic", col = "#444444")
+)
+
+grid.newpage()
+grid.arrange(titulo, tg, rodape, heights = unit.c(unit(1.2, "cm"), unit(1, "null"), unit(0.8, "cm")))
